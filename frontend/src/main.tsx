@@ -1,0 +1,35 @@
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App'
+import './index.css'
+
+// 에러 핸들링
+window.addEventListener('error', (event) => {
+  console.error('전역 에러:', event.error);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('처리되지 않은 Promise 거부:', event.reason);
+});
+
+try {
+  const rootElement = document.getElementById('root');
+  if (!rootElement) {
+    throw new Error('root 엘리먼트를 찾을 수 없습니다.');
+  }
+
+  ReactDOM.createRoot(rootElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+} catch (error) {
+  console.error('앱 초기화 실패:', error);
+  document.body.innerHTML = `
+    <div style="padding: 20px; font-family: sans-serif;">
+      <h1>앱 로드 실패</h1>
+      <p>${error instanceof Error ? error.message : '알 수 없는 오류'}</p>
+      <p>브라우저 콘솔을 확인해주세요.</p>
+    </div>
+  `;
+}

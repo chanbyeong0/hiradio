@@ -1,0 +1,56 @@
+# 환경 변수 (API 키 등 민감한 정보)
+.env
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 빌드 결과물
+frontend/dist/
+frontend/build/
+*.min.js
+*.min.css
+
+# 로그
+*.log
+logs/
+
+# 임시 파일
+*.tmp
+*.temp
+.cache/
+
+# 운영체제
+.DS_Store
+Thumbs.db
+desktop.ini
