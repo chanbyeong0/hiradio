@@ -137,28 +137,6 @@ hiradio/
 
 ---
 
-## 🐛 문제 해결
-
-**YouTube API 403 에러**
-- Google Cloud Console → YouTube Data API v3 활성화
-- API 할당량 확인 (일일 10,000 units)
-
-**TTS 재생 안 됨**
-- 네이버 클로바 TTS API 키 확인
-- 브라우저 자동 재생 정책 확인
-
-**경로 검색 실패**
-- ODsay, Kakao API 키 확인
-- 정확한 장소명 입력 (예: "강남역", "서울역")
-
----
-
-## 🔒 보안
-
-⚠️ **`.env` 파일을 절대 Git에 커밋하지 마세요!**
-
----
-
 ## 📄 라이선스
 
 MIT License
