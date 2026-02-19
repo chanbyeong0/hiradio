@@ -23,11 +23,12 @@ const NEWS_CATEGORY_LABELS: Record<string, string> = {
 };
 
 export default function PreviewScreen({ data, onStart }: Props) {
-  const [weatherText, setWeatherText] = useState<string>('');
+  const [, setWeatherText] = useState<string>('');
   const [weatherSummary, setWeatherSummary] = useState<string>('로딩 중...');
   const [mood, setMood] = useState<string>('로딩 중...');
   const [firstTrack, setFirstTrack] = useState<MusicTrack | null>(null);
   const [loading, setLoading] = useState(true);
+  const [starting, setStarting] = useState(false);
   const [routeData, setRouteData] = useState<NavRouteResult | null>(null);
 
   useEffect(() => {
@@ -143,7 +144,7 @@ export default function PreviewScreen({ data, onStart }: Props) {
       <div className="max-w-md mx-auto">
         {/* 헤더 */}
         <div className="text-center mb-8">
-          <div className="text-sm text-primary font-semibold mb-2">ONAIR</div>
+          <div className="text-sm text-primary font-semibold mb-2">하이라디오</div>
           <h1 className="text-2xl font-semibold mb-2 text-toss-gray-dark">
             {data.name}님을 위한<br />오늘의 출근길 라디오
           </h1>
@@ -238,8 +239,19 @@ export default function PreviewScreen({ data, onStart }: Props) {
 
         {/* Sticky Bottom 버튼 */}
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 p-4" style={{ paddingBottom: `calc(1rem + env(safe-area-inset-bottom))` }}>
-          <button onClick={() => onStart(firstTrack, mood)} className="toss-btn-primary">
-            출근 시작
+          <button
+            disabled={starting}
+            onClick={async () => {
+              setStarting(true);
+              try {
+                await onStart(firstTrack, mood);
+              } finally {
+                setStarting(false);
+              }
+            }}
+            className="toss-btn-primary disabled:opacity-70 disabled:cursor-not-allowed"
+          >
+            {starting ? '시작 중...' : '출근 시작'}
           </button>
         </div>
       </div>

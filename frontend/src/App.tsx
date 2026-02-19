@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { AppScreen, DJ_SPEAKER_IDS, MusicTrack, OnboardingData, RadioScripts, SessionState } from './types';
 import { storage } from './utils/storage';
+import { authStorage } from './utils/authStorage';
+import { api } from './api';
 import WelcomeScreen from './components/WelcomeScreen';
 import OnboardingScreen from './components/OnboardingScreen';
 import PreviewScreen from './components/PreviewScreen';
@@ -60,7 +62,17 @@ function App() {
     }
   };
 
-  const handleStartSession = (firstTrack: MusicTrack | null, mood: string = '') => {
+  const handleStartSession = async (firstTrack: MusicTrack | null, mood: string = '') => {
+    const user = authStorage.load();
+    if (user?.access_token) {
+      try {
+        const res = await api.consumeToken(user.access_token);
+        authStorage.save({ ...user, tokens_remaining: res.tokens_remaining });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '무료 토큰이 모두 소진되었습니다.');
+        return;
+      }
+    }
     setPreviewFirstTrack(firstTrack);
     setPreviewMood(mood && !mood.includes('로딩') ? mood : '');
     setScreen('LOADING');

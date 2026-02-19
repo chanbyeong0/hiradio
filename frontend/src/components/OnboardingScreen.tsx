@@ -18,12 +18,6 @@ const NEWS_CATEGORIES = [
   { id: 'opinion', label: '예술' },
 ];
 
-const RATIO_PRESETS = [
-  { radio: 3, music: 1, label: '3:1' },
-  { radio: 2, music: 1, label: '2:1' },
-  { radio: 4, music: 1, label: '4:1' },
-];
-
 const DJ_OPTIONS: Array<{ id: '커돌이' | '커순이'; label: string }> = [
   { id: '커돌이', label: '커돌이 (남자)' },
   { id: '커순이', label: '커순이 (여자)' },

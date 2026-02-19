@@ -1,0 +1,99 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: cursor_hackathon-backend
+    env_file:
+      - .env
+    environment:
+      MONGODB_URL: mongodb://mongodb:27017
+      # DEBUG=true 시 500 응답에 실제 오류 메시지 포함 (배포 시 제거)
+      DEBUG: ${DEBUG:-false}
+    expose:
+      - "9100"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - backend-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9100/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_API_BASE: /api
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
+    container_name: cursor_hackathon-frontend
+    ports:
+      - "9400:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - frontend-network
+      - backend-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  mongodb:
+    image: mongo:7.0
+    container_name: cursor_hackathon-mongodb
+    environment:
+      MONGO_INITDB_DATABASE: cursor_hackathon
+    volumes:
+      - cursor_hackathon_mongo_data:/data/db
+    restart: unless-stopped
+    networks:
+      - backend-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: cursor_hackathon-mongo-express
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      ME_CONFIG_MONGODB_URL: "mongodb://mongodb:27017"
+      ME_CONFIG_BASICAUTH_USERNAME: ${MONGO_EXPRESS_USERNAME:-admin}
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD:-admin123}
+      ME_CONFIG_SITE_BASEURL: "/mongo-express/"
+    ports:
+      - "9006:8081"
+    restart: unless-stopped
+    networks:
+      - backend-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8081/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  cursor_hackathon_mongo_data:
+    driver: local
+
+networks:
+  frontend-network:
+    driver: bridge
+  backend-network:
+    driver: bridge

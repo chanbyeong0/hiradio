@@ -2,9 +2,12 @@
 Azure OpenAI 연동 FastAPI 서버 (kyobo2 구조 참고)
 - 프론트에서 API 키를 노출하지 않고 채팅/완성 요청 가능
 - GET /weather: 날씨 API (Open-Meteo, 재사용 가능)
+- MongoDB: 로그인 계정별 무료 토큰 3개 제한
 """
 import logging
+import math
 import xml.etree.ElementTree as ET
+from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import httpx
@@ -25,14 +28,25 @@ if ROOT not in sys.path:
 os.chdir(ROOT)
 
 from backend.core import settings
+from backend.database import mongodb_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """앱 생명주기: MongoDB 연결/해제"""
+    await mongodb_service.connect()
+    yield
+    await mongodb_service.disconnect()
+
 
 app = FastAPI(
     title="Cursor Hackathon API",
     description="Azure OpenAI 연동 API",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -348,6 +362,208 @@ class NavRouteRequest(BaseModel):
     opt: int = 0  # 0=추천, 1=최소시간, 2=최소환승
 
 
+# --- 실시간 GPS 기반 경로 추적 (nav/track) ---
+class NavRouteCoords(BaseModel):
+    x: float  # 경도 (lng)
+    y: float  # 위도 (lat)
+
+
+class NavRouteLegForTrack(BaseModel):
+    trafficType: int
+    sectionTimeMin: Optional[int] = None
+    distanceM: Optional[int] = None
+    startName: Optional[str] = None
+    endName: Optional[str] = None
+    stationCount: Optional[int] = None
+    lineName: Optional[str] = None
+    stations: Optional[list[dict]] = None  # [{ stationName, x, y, ... }]
+
+
+class NavRouteForTrack(BaseModel):
+    """/nav/route 응답과 동일한 구조 (트래킹 시 클라이언트가 그대로 전달)"""
+    summary: dict
+    legs: list[NavRouteLegForTrack]
+    start_coords: NavRouteCoords
+    end_coords: NavRouteCoords
+
+
+class TrackPositionRequest(BaseModel):
+    """실시간 위치 기반 경로 상태 조회"""
+    lat: float  # 위도
+    lng: float  # 경도
+    route: NavRouteForTrack
+
+
+def _distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """두 좌표 간 거리(미터). Haversine 근사."""
+    R = 6371000  # 지구 반경 m
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+def _build_route_points(route: dict) -> list[dict]:
+    """경로 데이터에서 순서대로 (출발 + 역/정류장 + 도착) 포인트 목록 생성. Kakao/ODsay: x=경도, y=위도."""
+    points = []
+    start = route.get("start_coords") or {}
+    end = route.get("end_coords") or {}
+    legs = route.get("legs") or []
+
+    # 출발지
+    x0, y0 = float(start.get("x", 0)), float(start.get("y", 0))
+    points.append({
+        "x": x0, "y": y0, "legIndex": -1, "stationName": None, "trafficType": 0,
+        "is_first_subway": False, "is_transfer": False, "is_final_station": False, "point_type": "start",
+    })
+
+    first_subway_done = False
+    for leg_idx, leg in enumerate(legs):
+        traffic_type = int(leg.get("trafficType") or 0)
+        stations = leg.get("stations") or []
+        next_leg_is_subway = (
+            leg_idx + 1 < len(legs) and int((legs[leg_idx + 1] or {}).get("trafficType") or 0) == 1
+        )
+        is_last_leg = leg_idx == len(legs) - 1
+
+        for i, s in enumerate(stations):
+            try:
+                xx, yy = float(s.get("x") or 0), float(s.get("y") or 0)
+            except (TypeError, ValueError):
+                continue
+            st_name = s.get("stationName") or (leg.get("startName") if i == 0 else None) or leg.get("endName")
+            is_first_subway = traffic_type == 1 and not first_subway_done
+            if traffic_type == 1:
+                first_subway_done = True
+            is_transfer = next_leg_is_subway and (i == len(stations) - 1)
+            is_final_station = is_last_leg and (i == len(stations) - 1) and traffic_type == 1
+
+            points.append({
+                "x": xx, "y": yy, "legIndex": leg_idx, "stationName": st_name,
+                "trafficType": traffic_type,
+                "is_first_subway": is_first_subway, "is_transfer": is_transfer, "is_final_station": is_final_station,
+                "point_type": "station",
+            })
+
+    # 도착지
+    xe, ye = float(end.get("x", 0)), float(end.get("y", 0))
+    points.append({
+        "x": xe, "y": ye, "legIndex": len(legs) - 1 if legs else -1, "stationName": None,
+        "trafficType": 0, "is_first_subway": False, "is_transfer": False, "is_final_station": False,
+        "point_type": "end",
+    })
+
+    return points
+
+
+# "역 근처" 판정 거리(미터). 터널 등 GPS 오차 고려해 과도하게 짧지 않게
+_AT_STATION_THRESHOLD_M = 250
+
+
+async def _compute_track_state(lat: float, lng: float, route: dict) -> dict:
+    """
+    현재 위치(lat, lng)와 경로(route)를 비교해 상태 반환.
+    - state: "BEFORE_BOARDING" | "ON_BOARD"
+    - message: UI에 표시할 문구 (도착 N분 / 환승 알림 / 하차 알림)
+    - arrival_minutes: 탑승 전일 때만, 가장 빨리 오는 열차 도착 분
+    - stationName: 관련 역명
+    """
+    points = _build_route_points(route)
+    total_pts = len(points)
+    if total_pts < 2:
+        return {"state": "UNKNOWN", "message": "경로 정보가 없습니다.", "stationName": None, "arrival_minutes": None, "nearest_index": 0, "total_points": total_pts}
+
+    # 위경도 비교: points[].x=경도, .y=위도
+    min_dist = float("inf")
+    nearest_idx = 0
+    for i, p in enumerate(points):
+        d = _distance_m(lat, lng, float(p["y"]), float(p["x"]))
+        if d < min_dist:
+            min_dist = d
+            nearest_idx = i
+
+    first_subway_idx = next((i for i, p in enumerate(points) if p.get("is_first_subway")), None)
+    if first_subway_idx is None:
+        return {"state": "ON_BOARD", "message": "이동 중입니다.", "stationName": None, "arrival_minutes": None, "nearest_index": nearest_idx, "total_points": total_pts}
+
+    at_station = min_dist <= _AT_STATION_THRESHOLD_M
+    # 탑승 전: 출발~첫 지하철역 구간 또는 첫 역 근처(대기)
+    if nearest_idx < first_subway_idx or (nearest_idx == first_subway_idx and at_station):
+        first_pt = points[first_subway_idx]
+        station_name = first_pt.get("stationName") or (route.get("legs") or [{}])[first_pt.get("legIndex", 0)].get("startName") if first_subway_idx < len(points) else None
+        if not station_name and (route.get("legs") or []):
+            leg = (route["legs"] or [])[first_pt.get("legIndex", 0)]
+            station_name = leg.get("startName")
+        # 실시간 도착 정보 조회
+        arrivals = await _get_realtime_subway_arrival(station_name or "")
+        route_info = {"line": "", "stations": [], "destination": ""}
+        if route.get("legs") and first_subway_idx >= 0:
+            leg = route["legs"][first_pt.get("legIndex", 0)]
+            route_info = {
+                "line": leg.get("lineName") or "",
+                "stations": [s.get("stationName") for s in (leg.get("stations") or []) if s.get("stationName")],
+                "destination": leg.get("endName") or "",
+            }
+        filtered = _filter_arrivals_by_direction(arrivals, route_info) if arrivals else []
+        if filtered:
+            # barvlDt: 초 단위 도착 예정
+            barvl = filtered[0].get("barvlDt")
+            try:
+                sec = int(barvl) if barvl else 0
+                arrival_min = max(0, (sec + 30) // 60)
+            except (TypeError, ValueError):
+                arrival_min = 0
+            msg = f"{station_name}역 열차 약 {arrival_min}분 후 도착" if arrival_min > 0 else f"{station_name}역 열차 곧 도착"
+            return {
+                "state": "BEFORE_BOARDING",
+                "message": msg,
+                "stationName": station_name,
+                "arrival_minutes": arrival_min if arrival_min > 0 else None,
+                "nearest_index": nearest_idx,
+                "total_points": total_pts,
+            }
+        return {
+            "state": "BEFORE_BOARDING",
+            "message": f"{station_name or '역'}에서 열차를 기다리는 중입니다." if station_name else "출발지에서 첫 역으로 이동 중입니다.",
+            "stationName": station_name,
+            "arrival_minutes": None,
+            "nearest_index": nearest_idx,
+            "total_points": total_pts,
+        }
+
+    # 탑승 중: 다음 지하철 역이 환승역인지, 최종 하차역인지
+    next_subway_idx = None
+    for j in range(nearest_idx + 1, len(points)):
+        if points[j].get("trafficType") == 1 and points[j].get("point_type") == "station":
+            next_subway_idx = j
+            break
+    if next_subway_idx is not None:
+        pt = points[next_subway_idx]
+        if pt.get("is_final_station"):
+            return {
+                "state": "ON_BOARD",
+                "message": "조만간 내려야 합니다.",
+                "stationName": pt.get("stationName"),
+                "arrival_minutes": None,
+                "nearest_index": nearest_idx,
+                "total_points": total_pts,
+            }
+        if pt.get("is_transfer"):
+            return {
+                "state": "ON_BOARD",
+                "message": "조만간 환승해야 합니다.",
+                "stationName": pt.get("stationName"),
+                "arrival_minutes": None,
+                "nearest_index": nearest_idx,
+                "total_points": total_pts,
+            }
+
+    return {"state": "ON_BOARD", "message": "이동 중입니다.", "stationName": None, "arrival_minutes": None, "nearest_index": nearest_idx, "total_points": total_pts}
+
+
 class TTSRequest(BaseModel):
     """TTS 요청: 텍스트를 음성(MP3)으로 변환 (네이버 클로바 TTS Premium)"""
     text: str
@@ -602,6 +818,85 @@ async def health():
         "status": "healthy" if client else "no_azure_config",
         "azure_configured": bool(client),
     }
+
+
+# --- Google OAuth (로그인) ---
+class GoogleAuthRequest(BaseModel):
+    credential: str  # Google ID token (JWT)
+
+
+@app.post("/auth/google")
+async def auth_google(body: GoogleAuthRequest):
+    """Google ID 토큰 검증 후 사용자 정보 반환"""
+    if not body.credential or not body.credential.strip():
+        return JSONResponse(status_code=400, content={"detail": "credential이 필요합니다."})
+    if not settings.google_client_id:
+        logger.warning("GOOGLE_CLIENT_ID가 설정되지 않았습니다.")
+        return JSONResponse(status_code=503, content={"detail": "Google 로그인이 설정되지 않았습니다."})
+
+    try:
+        from google.oauth2 import id_token
+        from google.auth.transport import requests as google_requests
+
+        idinfo = id_token.verify_oauth2_token(
+            body.credential.strip(),
+            google_requests.Request(),
+            settings.google_client_id,
+        )
+        # idinfo: {'iss': 'https://accounts.google.com', 'azp': '...', 'aud': '...', 'sub': '...', 'email': '...', ...}
+        user_id = idinfo.get("sub")
+        email = idinfo.get("email", "")
+        name = idinfo.get("name") or idinfo.get("given_name") or email.split("@")[0] or "사용자"
+        picture = idinfo.get("picture") or ""
+
+        # MongoDB: 사용자 토큰 생성/조회 (신규 시 무료 3개 부여)
+        tokens_info = await mongodb_service.get_or_create_user_tokens(user_id, email, name)
+
+        # JWT 액세스 토큰 생성
+        from backend.auth import create_access_token
+        access_token = create_access_token(user_id, email, name)
+
+        return {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "access_token": access_token,
+            "tokens_remaining": tokens_info["tokens_remaining"],
+        }
+    except ValueError as e:
+        logger.warning("Google 토큰 검증 실패: %s", e)
+        return JSONResponse(status_code=401, content={"detail": "유효하지 않은 로그인 정보입니다."})
+    except Exception as e:
+        logger.exception("Google 인증 오류: %s", e)
+        detail = "인증 처리 중 오류가 발생했습니다."
+        if settings.debug:
+            detail = f"{detail} ({type(e).__name__}: {e})"
+        return JSONResponse(status_code=500, content={"detail": detail})
+
+
+# --- 무료 토큰 API (JWT 필요) ---
+from fastapi import Depends
+from backend.auth import require_user_id
+
+
+@app.get("/users/me/tokens")
+async def get_my_tokens(user_id: str = Depends(require_user_id)):
+    """남은 무료 토큰 수 조회"""
+    remaining = await mongodb_service.get_tokens_remaining(user_id)
+    return {"tokens_remaining": remaining}
+
+
+@app.post("/users/me/tokens/consume")
+async def consume_token(user_id: str = Depends(require_user_id)):
+    """세션 시작 시 토큰 1개 소비. 성공 시 남은 수 반환, 없으면 402."""
+    remaining = await mongodb_service.consume_token(user_id)
+    if remaining is None:
+        return JSONResponse(
+            status_code=402,
+            content={"detail": "무료 토큰이 모두 소진되었습니다. 오늘은 여기까지예요!"},
+        )
+    return {"tokens_remaining": remaining}
 
 
 KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
@@ -886,6 +1181,31 @@ async def nav_route(request: NavRouteRequest):
         return JSONResponse(
             status_code=500,
             content={"detail": str(e), "error": "nav_route_error"},
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+
+
+@app.post("/nav/track")
+async def nav_track(request: TrackPositionRequest):
+    """실시간 GPS 기반 경로 추적: 탑승 전(열차 도착 N분) / 탑승 중(환승·하차 알림)."""
+    try:
+        route_dict = request.route.model_dump()
+        result = await _compute_track_state(request.lat, request.lng, route_dict)
+        return result
+    except Exception as e:
+        logger.exception("nav/track 예외: %s", e)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": str(e),
+                "error": "nav_track_error",
+                "state": "UNKNOWN",
+                "message": "위치를 확인할 수 없습니다.",
+                "stationName": None,
+                "arrival_minutes": None,
+                "nearest_index": 0,
+                "total_points": 0,
+            },
             headers={"Access-Control-Allow-Origin": "*"},
         )
 

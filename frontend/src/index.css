@@ -84,6 +84,22 @@
     @apply bg-gray-100 text-gray-700 rounded-full px-3 py-1.5 text-sm font-medium;
   }
 
+  /* 로그인/계정 카드 */
+  .toss-account-card {
+    @apply bg-white rounded-toss p-5 border border-gray-100;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  }
+
+  /* Google 로그인 버튼 래퍼 (토스 스타일) */
+  .google-login-wrapper {
+    @apply flex justify-center items-center w-full rounded-toss-button overflow-hidden;
+    min-height: 52px;
+  }
+
+  .google-login-wrapper > div {
+    @apply w-full flex justify-center;
+  }
+
   /* 세이프 에어리어 클래스 */
   .safe-area {
     padding-bottom: env(safe-area-inset-bottom);
@@ -97,5 +113,50 @@
   /* 스켈레톤 로딩 */
   .skeleton {
     @apply bg-gray-200 rounded-toss animate-pulse;
+  }
+
+  /* 물결 애니메이션 (네비와 라디오 자막 사이 배경) */
+  .wave-strip {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(135deg, #e0f2fe 0%, #bfdbfe 40%, #e0f2fe 100%);
+  }
+
+  .wave-strip::before,
+  .wave-strip::after {
+    content: '';
+    position: absolute;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background-repeat: repeat no-repeat;
+    background-position: 0 bottom;
+    background-size: 50% 100%;
+    opacity: 0.8;
+    animation: wave-move 10s linear infinite;
+  }
+
+  .wave-strip::before {
+    bottom: -10%;
+    background-image: radial-gradient(circle at 50% 120%, rgba(59, 130, 246, 0.35) 25%, transparent 26%),
+      radial-gradient(circle at 0 150%, rgba(59, 130, 246, 0.35) 25%, transparent 26%),
+      radial-gradient(circle at 100% 150%, rgba(59, 130, 246, 0.4) 25%, transparent 26%);
+  }
+
+  .wave-strip::after {
+    bottom: -5%;
+    opacity: 0.7;
+    animation-duration: 16s;
+    background-image: radial-gradient(circle at 20% 120%, rgba(59, 130, 246, 0.3) 25%, transparent 26%),
+      radial-gradient(circle at 80% 140%, rgba(59, 130, 246, 0.3) 25%, transparent 26%);
+  }
+}
+
+@keyframes wave-move {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-25%);
   }
 }

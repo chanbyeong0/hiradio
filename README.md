@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="frontend/src/assets/images/logo.png" alt="ONAIR Logo" width="200"/>
+<img src="frontend/src/assets/images/logo.png" alt="하이라디오 Logo" width="200"/>
 
-# ONAIR 🎙️
+# 하이라디오 🎙️
 
 **출근길을 위한 개인 맞춤형 AI 라디오**
 
@@ -152,6 +152,6 @@ MIT License
 [![GitHub](https://img.shields.io/badge/GitHub-chanbyeong0-181717?style=flat-square&logo=github)](https://github.com/chanbyeong0)
 [![Cursor](https://img.shields.io/badge/Built%20with-Cursor%20AI-blueviolet?style=flat-square)](https://cursor.sh)
 
-*출근길이 즐거워지는 순간, ONAIR와 함께* ✨
+*출근길이 즐거워지는 순간, 하이라디오와 함께* ✨
 
 </div>

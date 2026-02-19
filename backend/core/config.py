@@ -46,6 +46,22 @@ class Settings(BaseSettings):
     # 서울시 지하철 실시간 도착정보 (공공데이터)
     seoul_subway_api_key: str = ""
 
+    # Google OAuth (로그인)
+    google_client_id: str = ""
+
+    # MongoDB (무료 토큰 관리)
+    mongodb_url: str = ""
+    mongodb_database: str = "cursor_hackathon"
+    mongodb_collection: str = "user_tokens"
+
+    # JWT (세션 토큰)
+    jwt_secret: str = "cursor-hackathon-secret-change-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_hours: int = 24 * 7  # 7일
+
+    # 디버그 (500 응답에 실제 오류 메시지 포함, 배포 시 false 권장)
+    debug: bool = False
+
     class Config:
         env_file = str(_ENV_FILE) if _ENV_FILE.exists() else ".env"
         env_file_encoding = "utf-8"

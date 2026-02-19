@@ -1,9 +1,49 @@
-import { useState, useEffect, useRef } from 'react';
-import { DJ_SPEAKER_IDS, MusicTrack, NavRouteResult, OnboardingData, PlayPhase, RadioScripts, SessionState } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { DJ_SPEAKER_IDS, MusicTrack, NavRouteResult, OnboardingData, PlayPhase, RadioScripts, SessionState, TrackPositionResponse } from '../types';
 import { api } from '../api';
 import { getMusicQueryForWeather, getMusicSearchPhraseAt, FALLBACK_MUSIC_QUERY } from '../utils/musicQueries';
 
 const TRAFFIC_TYPE_LABEL: Record<number, string> = { 1: '지하철', 2: '버스', 3: '도보' };
+
+/** 경로에서 키 포인트만 추출: 집(출발) → 탑승역 → 환승역들 → 하차역 → 회사(도착) */
+function getRouteKeyPoints(
+  route: NavRouteResult | null,
+  startLabel: string,
+  endLabel: string,
+): { keyLabels: string[]; keyIndices: number[]; totalFull: number } {
+  if (!route?.legs?.length) return { keyLabels: [], keyIndices: [], totalFull: 0 };
+
+  const totalFull = 1 + route.legs.reduce((s, l) => s + (l.stations?.length ?? 0), 0) + 1;
+  const keyIndices: number[] = [0];
+  const keyLabels: string[] = [startLabel];
+
+  let runningIndex = 1;
+  let lastSubwayEndIdx: number | null = null;
+  let lastSubwayEndLabel: string | null = null;
+
+  for (const leg of route.legs) {
+    const stations = leg.stations ?? [];
+    const n = stations.length;
+    if (leg.trafficType === 1 && n > 0) {
+      keyIndices.push(runningIndex);
+      keyLabels.push(stations[0].stationName || leg.startName || '');
+      lastSubwayEndIdx = runningIndex + n - 1;
+      lastSubwayEndLabel = stations[n - 1].stationName || leg.endName || '';
+      runningIndex += n;
+    } else if (n > 0) {
+      runningIndex += n;
+    }
+  }
+
+  if (lastSubwayEndIdx != null && keyIndices[keyIndices.length - 1] !== lastSubwayEndIdx) {
+    keyIndices.push(lastSubwayEndIdx);
+    keyLabels.push(lastSubwayEndLabel ?? '');
+  }
+  keyIndices.push(totalFull - 1);
+  keyLabels.push(endLabel);
+
+  return { keyLabels, keyIndices, totalFull };
+}
 
 declare global {
   interface Window {
@@ -56,8 +96,10 @@ export default function NowPlayingScreen({
   const [isPaused, setIsPaused] = useState(false);
   /** 길찾기 경로 (집 → 회사). 상단 전체 경로 표시용 */
   const [routeData, setRouteData] = useState<NavRouteResult | null>(null);
+  /** 실시간 GPS 기반 경로 추적 알림 (탑승 전 열차 도착 / 탑승 중 환승·하차) */
+  const [trackStatus, setTrackStatus] = useState<TrackPositionResponse | null>(null);
 
-  const musicTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const musicTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const ytPlayerRef = useRef<YT.Player | null>(null);
   const onMusicEndRef = useRef<(() => void) | null>(null);
@@ -123,6 +165,49 @@ export default function NowPlayingScreen({
       });
     return () => { cancelled = true; };
   }, [data.startLocation, data.companyLocation]);
+
+  // 실시간 GPS 기반 경로 추적 (주기 폴링, 터널 등 오차 고려해 18초 간격)
+  const TRACK_POLL_INTERVAL_MS = 18000;
+  useEffect(() => {
+    if (!routeData || !navigator.geolocation) return;
+    let cancelled = false;
+    const fetchPositionAndTrack = () => {
+      if (cancelled) return;
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          if (cancelled) return;
+          const { latitude, longitude } = pos.coords;
+          const route = {
+            summary: routeData.summary,
+            legs: routeData.legs,
+            start_coords: routeData.start_coords,
+            end_coords: routeData.end_coords,
+          };
+          api
+            .getTrackPosition(route, latitude, longitude)
+            .then((res) => {
+              if (!cancelled) setTrackStatus(res);
+            })
+            .catch((err) => {
+              if (!cancelled) {
+                console.warn('경로 추적 조회 실패:', err);
+                setTrackStatus(null);
+              }
+            });
+        },
+        () => {
+          if (!cancelled) setTrackStatus(null);
+        },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
+      );
+    };
+    fetchPositionAndTrack();
+    const intervalId = setInterval(fetchPositionAndTrack, TRACK_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [routeData]);
 
   // 라디오 구간: TTS 인사말 또는 뉴스(한 건씩) 재생
   const newsSegments = radioScripts?.news
@@ -254,7 +339,6 @@ export default function NowPlayingScreen({
     if (sessionState !== 'PLAYING_MUSIC' || isPaused) return;
 
     const isFirstMusic = phase === 'first_music';
-    const isLoopMusic = phase === 'music';
 
     const loadAndPlayMusic = async () => {
       try {
@@ -471,6 +555,19 @@ export default function NowPlayingScreen({
         ? firstSongIntroText
         : (newsSegments[currentNewsIndex] ?? '');
 
+  /** 경로 그래프: 키 포인트만 (집 → 탑승역 → 환승역 → 하차역 → 회사), 현재 위치는 nearest_index로 매핑 */
+  const { keyLabels, keyIndices, totalFull } = getRouteKeyPoints(
+    routeData,
+    data.startLocation || '출발',
+    data.companyLocation || '도착',
+  );
+  const keyTotal = keyLabels.length;
+  const nearestIdx = Math.min(Math.max(0, trackStatus?.nearest_index ?? 0), totalFull - 1);
+  let currentKeyIndex = 0;
+  for (let i = 0; i < keyIndices.length; i++) {
+    if (nearestIdx >= keyIndices[i]) currentKeyIndex = i;
+  }
+
   return (
     <div className="min-h-screen bg-toss-gray px-4 py-4 safe-area pb-24">
       <div className="max-w-md mx-auto">
@@ -489,111 +586,124 @@ export default function NowPlayingScreen({
           </button>
         </div>
 
-        {/* 전체 경로 (길찾기) — 실시간 지하철 도착 정보 포함 */}
-        {routeData && (
+        {/* 경로 그래프: 두 번째 참고 이미지 비율 — 점·선 균등 배치, 각 점 아래 라벨, 현재 구간 바 */}
+        {routeData && keyTotal >= 2 && (
           <div className="mb-4">
-            {/* 요약 정보 */}
             <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-              {/* 헤더: 총 소요시간 */}
-              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 px-4 py-3 border-b border-gray-100">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-2xl">🚇</span>
-                    <div>
-                      <div className="text-lg font-bold text-gray-900">
-                        약 {routeData.summary.total_time_min}분
-                      </div>
-                      <div className="text-xs text-gray-600">
-                        {(routeData.summary.total_distance_m / 1000).toFixed(1)}km · {routeData.summary.payment_won.toLocaleString()}원
-                      </div>
-                    </div>
-                  </div>
-                  {routeData.summary.bus_transit_count + routeData.summary.subway_transit_count > 0 && (
-                    <div className="text-xs text-gray-500">
-                      환승 {routeData.summary.bus_transit_count + routeData.summary.subway_transit_count}회
-                    </div>
-                  )}
-                </div>
+              {/* 상단: 약 N분 */}
+              <div className="flex justify-end px-4 pt-3 pb-1">
+                <span className="text-sm font-medium text-gray-600">약 {routeData.summary.total_time_min}분</span>
               </div>
 
-              {/* 경로 상세 */}
-              <div className="p-4 space-y-3">
-                {routeData.legs.map((leg, idx) => {
-                  const isSubway = leg.trafficType === 1;
-                  const isBus = leg.trafficType === 2;
-                  const isWalk = leg.trafficType === 3;
-                  const realtimeInfo = isSubway && leg.startName ? routeData.realtime_subway?.[leg.startName] : null;
-                  
+              {/* 점 + 선: 그리드로 균등 배치 (점 고정, 선이 나머지 균분) */}
+              <div
+                className="px-4 pb-2"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: keyLabels.map((_, i) => (i < keyTotal - 1 ? '24px 1fr' : '24px')).join(' '),
+                  alignItems: 'center',
+                  columnGap: 0,
+                }}
+              >
+                {keyLabels.map((_, i) => {
+                  const isCurrent = i === currentKeyIndex;
+                  const isPassed = i < currentKeyIndex;
                   return (
-                    <div key={idx} className="flex items-start gap-3">
-                      {/* 아이콘 */}
-                      <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${
-                        isSubway ? 'bg-blue-100 text-blue-700' :
-                        isBus ? 'bg-green-100 text-green-700' :
-                        'bg-gray-100 text-gray-600'
-                      }`}>
-                        {isSubway ? '🚇' : isBus ? '🚌' : '🚶'}
+                    <React.Fragment key={i}>
+                      <div
+                        className="flex justify-center items-center"
+                        style={{ gridColumn: 2 * i + 1, gridRow: 1 }}
+                      >
+                        <span
+                          className={[
+                            'inline-flex items-center justify-center rounded-full border-2 flex-shrink-0 transition-colors',
+                            isCurrent
+                              ? 'bg-primary text-white border-primary'
+                              : isPassed
+                                ? 'bg-primary/10 border-primary/60 text-primary'
+                                : 'bg-white border-gray-300 text-gray-300',
+                            'w-6 h-6',
+                          ].join(' ')}
+                        >
+                          {/* 상단 점은 모두 아이콘 없이 원만 사용 (라벨은 아래에서 표시) */}
+                        </span>
                       </div>
-
-                      {/* 정보 */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-baseline gap-2 mb-1">
-                          <span className="font-semibold text-gray-900">
-                            {leg.lineName || TRAFFIC_TYPE_LABEL[leg.trafficType] || '이동'}
-                          </span>
-                          <span className="text-sm text-gray-500">
-                            {leg.sectionTimeMin}분
-                          </span>
-                        </div>
-                        
-                        {(leg.startName || leg.endName) && (
-                          <div className="text-sm text-gray-600 mb-1">
-                            {leg.startName && <span>{leg.startName}</span>}
-                            {leg.startName && leg.endName && <span className="mx-1.5 text-gray-400">→</span>}
-                            {leg.endName && <span>{leg.endName}</span>}
-                            {leg.stationCount && leg.stationCount > 0 && (
-                              <span className="ml-2 text-xs text-gray-500">
-                                ({leg.stationCount}개 정류장)
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        {/* 실시간 지하철 도착 정보 */}
-                        {isSubway && realtimeInfo && realtimeInfo.length > 0 && (
-                          <div className="mt-2 space-y-1">
-                            {realtimeInfo.slice(0, 2).map((arrival, i) => {
-                              const seconds = arrival.barvlDt ? parseInt(arrival.barvlDt) : 0;
-                              const minutes = Math.floor(seconds / 60);
-                              const displayTime = minutes > 0 ? `${minutes}분` : '곧 도착';
-                              
-                              return (
-                                <div key={i} className="flex items-center gap-2 text-xs">
-                                  <span className="inline-flex items-center px-2 py-1 rounded-full bg-blue-50 text-blue-700 font-medium">
-                                    🚇 {displayTime}
-                                  </span>
-                                  <span className="text-gray-600 truncate">
-                                    {arrival.arvlMsg2 || arrival.trainLineNm || '정보 없음'}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        {isWalk && leg.distanceM && (
-                          <div className="text-xs text-gray-500">
-                            도보 {leg.distanceM}m
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                      {i < keyTotal - 1 && (
+                        <div
+                          className="self-center min-w-[12px]"
+                          style={{
+                            gridColumn: 2 * i + 2,
+                            gridRow: 1,
+                            height: 4,
+                            borderRadius: 9999,
+                            backgroundColor: i < currentKeyIndex ? 'var(--color-primary, #4F46E5)' : '#e5e7eb',
+                          }}
+                        />
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </div>
+
+              {/* 각 점 바로 아래 라벨 — 같은 그리드 컬럼에 맞춤 */}
+              <div
+                className="px-4 pb-3"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: keyLabels.map((_, i) => (i < keyTotal - 1 ? '24px 1fr' : '24px')).join(' '),
+                  alignItems: 'start',
+                  columnGap: 0,
+                }}
+              >
+                {keyLabels.map((label, i) => (
+                  <div
+                    key={`label-${i}`}
+                    className="flex justify-center text-center"
+                    style={{ gridColumn: 2 * i + 1, gridRow: 1 }}
+                  >
+                    <span
+                      className={`text-xs truncate max-w-[72px] block ${i === currentKeyIndex ? 'text-primary font-semibold' : 'text-gray-500'}`}
+                    >
+                      {i === 0 ? '집' : i === keyTotal - 1 ? '회사' : label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {/* 현재 구간 바: 현재역 → 다음역 (참고 이미지 두 번째 중간 바) */}
+              {currentKeyIndex < keyTotal - 1 && (
+                <div className="px-4 pb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-gray-900 shrink-0">
+                      {currentKeyIndex === 0 ? '집' : keyLabels[currentKeyIndex]}
+                    </span>
+                    <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-primary rounded-full transition-all"
+                        style={{ width: '50%' }}
+                      />
+                    </div>
+                    <span className="text-sm font-bold text-gray-900 shrink-0">
+                      {currentKeyIndex + 1 === keyTotal - 1 ? '회사' : keyLabels[currentKeyIndex + 1]}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* 환승/하차 메시지 */}
+              {trackStatus?.message && trackStatus.message !== '이동 중입니다.' && (
+                <div className="px-4 pb-3 space-y-0.5">
+                  <p className="text-xs font-medium text-primary">{trackStatus.message}</p>
+                </div>
+              )}
             </div>
           </div>
         )}
+
+        {/* 네비와 라디오 자막 사이 물결 애니메이션 영역 (화면 기준 좌우 여백 없이) */}
+        <div className="mb-4 -mx-4">
+          <div className="wave-strip h-16 w-full" />
+        </div>
 
         {/* 하단 콘텐츠 카드: TTS 자막(버블) 또는 음악(유튜브) */}
         {sessionState === 'PLAYING_RADIO' && (phase === 'greeting' || phase === 'first_song_intro' || phase === 'news') && (

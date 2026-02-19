@@ -1,3 +1,15 @@
+/** Google 로그인 사용자 정보 */
+export interface User {
+  user_id: string;
+  email: string;
+  name: string;
+  picture: string;
+  /** JWT 액세스 토큰 (API 인증용) */
+  access_token?: string;
+  /** 남은 무료 토큰 수 */
+  tokens_remaining?: number;
+}
+
 /** DJ 이름 → 클로바 TTS speaker ID (커돌이: 남자, 커순이: 여자) */
 export const DJ_SPEAKER_IDS: Record<string, string> = {
   커돌이: 'nes_c_kihyo',
@@ -118,4 +130,18 @@ export interface NavRouteResult {
   start_coords: { x: number; y: number };
   end_coords: { x: number; y: number };
   realtime_subway?: Record<string, RealtimeArrival[]>;
+}
+
+/** 실시간 GPS 기반 경로 추적 응답 */
+export type TrackState = 'BEFORE_BOARDING' | 'ON_BOARD' | 'UNKNOWN';
+
+export interface TrackPositionResponse {
+  state: TrackState | string;
+  message: string;
+  stationName: string | null;
+  arrival_minutes: number | null;
+  /** 현재 위치에 해당하는 경로 포인트 인덱스 (그래프 하이라이트용) */
+  nearest_index?: number;
+  /** 경로 전체 포인트 수 */
+  total_points?: number;
 }

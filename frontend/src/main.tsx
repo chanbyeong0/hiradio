@@ -1,7 +1,10 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { GoogleOAuthProvider } from '@react-oauth/google'
 import App from './App'
 import './index.css'
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
 
 // 에러 핸들링
 window.addEventListener('error', (event) => {
@@ -18,11 +21,22 @@ try {
     throw new Error('root 엘리먼트를 찾을 수 없습니다.');
   }
 
-  ReactDOM.createRoot(rootElement).render(
+  const app = (
     <React.StrictMode>
       <App />
     </React.StrictMode>
   );
+
+  const root = ReactDOM.createRoot(rootElement);
+  if (GOOGLE_CLIENT_ID) {
+    root.render(
+      <GoogleOAuthProvider clientId={GOOGLE_CLIENT_ID}>
+        {app}
+      </GoogleOAuthProvider>
+    );
+  } else {
+    root.render(app);
+  }
 } catch (error) {
   console.error('앱 초기화 실패:', error);
   document.body.innerHTML = `
